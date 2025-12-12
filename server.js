@@ -10,12 +10,6 @@ const MQTT_URL = process.env.MQTT_URL || 'mqtt://broker.emqx.io:1883';
 const MQTT_TOPIC = process.env.MQTT_TOPIC || 'stylesync/distance';
 const PORT = process.env.PORT || 3000;
 
-// const DB_HOST = process.env.DB_HOST || 'localhost';
-// const DB_PORT = process.env.DB_PORT || 3306;
-// const DB_USER = process.env.DB_USER || 'root';
-// const DB_PASS = process.env.DB_PASS || '';
-// const DB_NAME = process.env.DB_NAME || 'stylesync';
-
 const DB_HOST = process.env.DB_HOST || 'localhost';
 const DB_PORT = process.env.DB_PORT || 3306;
 const DB_USER = process.env.DB_USER || 'styn6457';
@@ -24,7 +18,7 @@ const DB_NAME = process.env.DB_NAME || 'styn6457_StyleSync';
 
 let db;
 
-// Helper: compute status from distance
+// Helper: compute status
 function computeStatus(distance) {
     if (distance <= 0 || isNaN(distance)) return 'safe';
     if (distance < 5) return 'danger';
@@ -45,17 +39,30 @@ async function initDb() {
     });
 }
 
-// Start express + socket.io
+// Start express
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+// ======================
+// ROUTE ROOT WAJIB ADA
+// ======================
+app.get('/', (req, res) => {
+    res.json({
+        status: 'Server is running',
+        mqtt_broker: MQTT_URL,
+        mqtt_topic: MQTT_TOPIC,
+        database: DB_NAME
+    });
+});
+// ======================
 
 const server = http.createServer(app);
 const io = new Server(server, {
     cors: { origin: '*' }
 });
 
-// Simple REST: get latest value
+// REST API
 app.get('/api/latest', async (req, res) => {
     try {
         const [rows] = await db.query('SELECT * FROM latest_value WHERE id = 1 LIMIT 1');
@@ -66,7 +73,6 @@ app.get('/api/latest', async (req, res) => {
     }
 });
 
-// REST: recent logs
 app.get('/api/logs', async (req, res) => {
     const limit = parseInt(req.query.limit) || 100;
     try {
@@ -78,7 +84,6 @@ app.get('/api/logs', async (req, res) => {
     }
 });
 
-// REST: recent alerts
 app.get('/api/alerts', async (req, res) => {
     try {
         const [rows] = await db.query('SELECT * FROM alerts ORDER BY created_at DESC LIMIT 50');
@@ -89,24 +94,23 @@ app.get('/api/alerts', async (req, res) => {
     }
 });
 
+// Start server
 server.listen(PORT, async () => {
     try {
         await initDb();
         console.log(`HTTP + Socket.IO listening on :${PORT}`);
-        // connect mqtt after DB ready
         startMQTT();
     } catch (err) {
         console.error('DB init error', err);
     }
 });
 
-// Socket.IO connection logs
 io.on('connection', (socket) => {
     console.log('Socket connected', socket.id);
     socket.on('disconnect', () => console.log('Socket disconnected', socket.id));
 });
 
-// MQTT client
+// MQTT
 let mqttClient;
 function startMQTT() {
     mqttClient = mqtt.connect(MQTT_URL, { reconnectPeriod: 2000 });
@@ -123,16 +127,15 @@ function startMQTT() {
 
     mqttClient.on('message', async (topic, message) => {
         try {
-            // parse payload: expect JSON like {"distance": 12.34}
             const text = message.toString();
             let payload;
+
             try {
                 payload = JSON.parse(text);
-            } catch (e) {
-                // fallback: support {"msg":"7"} or plain number
+            } catch {
                 try {
                     payload = JSON.parse(text.replace(/['"]/g, '"'));
-                } catch (err) {
+                } catch {
                     payload = { distance: parseFloat(text) || null };
                 }
             }
@@ -140,21 +143,19 @@ function startMQTT() {
             const distance = parseFloat(payload.distance ?? payload.msg ?? payload.value ?? null);
             const status = computeStatus(distance);
 
-            // insert to logs
             await db.query('INSERT INTO logs(distance, status) VALUES (?, ?)', [distance || 0, status]);
 
-            // update latest_value table
-            await db.query('UPDATE latest_value SET distance = ?, status = ?, updated_at = NOW() WHERE id = 1', [distance || 0, status]);
+            await db.query('UPDATE latest_value SET distance = ?, status = ?, updated_at = NOW() WHERE id = 1',
+                [distance || 0, status]
+            );
 
-            // insert alerts for warning/danger
             if (status === 'warning' || status === 'danger') {
-                const msg = status === 'danger' ?
-                    `Jarak tangan terdeteksi ${distance} cm - BAHAYA!` :
-                    `Jarak tangan terdeteksi ${distance} cm - Waspada`;
+                const msg = status === 'danger'
+                    ? `Jarak tangan terdeteksi ${distance} cm - BAHAYA!`
+                    : `Jarak tangan terdeteksi ${distance} cm - Waspada`;
                 await db.query('INSERT INTO alerts(message, level) VALUES (?, ?)', [msg, status]);
             }
 
-            // emit to dashboard
             io.emit('distance_update', { distance, status, ts: new Date().toISOString() });
 
             console.log('Saved distance:', distance, 'status:', status);
