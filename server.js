@@ -27,7 +27,7 @@ mqttClient.on('message', async (topic, message) => {
     const { error } = await supabase
       .from('sensor_data')
       .insert({
-        profiles_id: process.env.PROFILEs_ID,
+        profiles_id: process.env.PROFILES_ID,
         distance: data.distance,
         status: data.status
       });
@@ -50,4 +50,5 @@ app.get('/', (req, res) => {
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
+
 
