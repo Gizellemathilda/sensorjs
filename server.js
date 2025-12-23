@@ -1,166 +1,52 @@
 require('dotenv').config();
 const mqtt = require('mqtt');
 const express = require('express');
-const http = require('http');
-const { Server } = require('socket.io');
-const mysql = require('mysql2/promise');
-const cors = require('cors');
+const { createClient } = require('@supabase/supabase-js');
 
-const MQTT_URL = process.env.MQTT_URL || 'mqtt://broker.emqx.io:1883';
-const MQTT_TOPIC = process.env.MQTT_TOPIC || 'stylesync/distance';
+const app = express();
 const PORT = process.env.PORT || 3000;
 
-const DB_HOST = process.env.DB_HOST || 'localhost';
-const DB_PORT = process.env.DB_PORT || 3306;
-const DB_USER = process.env.DB_USER || 'styn6457';
-const DB_PASS = process.env.DB_PASS || '@Pakrifqi12';
-const DB_NAME = process.env.DB_NAME || 'styn6457_StyleSync';
-
-let db;
-
-// Helper: compute status
-function computeStatus(distance) {
-    if (distance <= 0 || isNaN(distance)) return 'safe';
-    if (distance < 5) return 'danger';
-    if (distance < 15) return 'warning';
-    return 'safe';
-}
-
-async function initDb() {
-    db = await mysql.createPool({
-        host: DB_HOST,
-        port: DB_PORT,
-        user: DB_USER,
-        password: DB_PASS,
-        database: DB_NAME,
-        waitForConnections: true,
-        connectionLimit: 10,
-        queueLimit: 0
-    });
-}
-
-// Start express
-const app = express();
-app.use(cors());
-app.use(express.json());
-
-// ======================
-// ROUTE ROOT WAJIB ADA
-// ======================
-app.get('/', (req, res) => {
-    res.json({
-        status: 'Server is running',
-        mqtt_broker: MQTT_URL,
-        mqtt_topic: MQTT_TOPIC,
-        database: DB_NAME
-    });
-});
-// ======================
-
-const server = http.createServer(app);
-const io = new Server(server, {
-    cors: { origin: '*' }
-});
-
-// REST API
-app.get('/api/latest', async (req, res) => {
-    try {
-        const [rows] = await db.query('SELECT * FROM latest_value WHERE id = 1 LIMIT 1');
-        res.json(rows[0] || {});
-    } catch (err) {
-        console.error(err);
-        res.status(500).json({ error: 'db error' });
-    }
-});
-
-app.get('/api/logs', async (req, res) => {
-    const limit = parseInt(req.query.limit) || 100;
-    try {
-        const [rows] = await db.query('SELECT * FROM logs ORDER BY created_at DESC LIMIT ?', [limit]);
-        res.json(rows);
-    } catch (err) {
-        console.error(err);
-        res.status(500).json({ error: 'db error' });
-    }
-});
-
-app.get('/api/alerts', async (req, res) => {
-    try {
-        const [rows] = await db.query('SELECT * FROM alerts ORDER BY created_at DESC LIMIT 50');
-        res.json(rows);
-    } catch (err) {
-        console.error(err);
-        res.status(500).json({ error: 'db error' });
-    }
-});
-
-// Start server
-server.listen(PORT, async () => {
-    try {
-        await initDb();
-        console.log(`HTTP + Socket.IO listening on :${PORT}`);
-        startMQTT();
-    } catch (err) {
-        console.error('DB init error', err);
-    }
-});
-
-io.on('connection', (socket) => {
-    console.log('Socket connected', socket.id);
-    socket.on('disconnect', () => console.log('Socket disconnected', socket.id));
-});
+// Supabase (SERVICE ROLE)
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY
+);
 
 // MQTT
-let mqttClient;
-function startMQTT() {
-    mqttClient = mqtt.connect(MQTT_URL, { reconnectPeriod: 2000 });
+const mqttClient = mqtt.connect('mqtt://broker.emqx.io:1883');
 
-    mqttClient.on('connect', () => {
-        console.log('Connected to MQTT broker:', MQTT_URL);
-        mqttClient.subscribe(MQTT_TOPIC, (err) => {
-            if (err) console.error('Subscribe error', err);
-            else console.log('Subscribed to', MQTT_TOPIC);
-        });
-    });
+mqttClient.on('connect', () => {
+  console.log('MQTT CONNECTED');
+  mqttClient.subscribe('distance');
+});
 
-    mqttClient.on('error', (err) => console.error('MQTT error', err));
+mqttClient.on('message', async (topic, message) => {
+  try {
+    const data = JSON.parse(message.toString());
 
-    mqttClient.on('message', async (topic, message) => {
-        try {
-            const text = message.toString();
-            let payload;
+    const { error } = await supabase
+      .from('sensor_data')
+      .insert({
+        profile_id: process.env.PROFILE_ID,
+        distance: data.distance,
+        status: data.status
+      });
 
-            try {
-                payload = JSON.parse(text);
-            } catch {
-                try {
-                    payload = JSON.parse(text.replace(/['"]/g, '"'));
-                } catch {
-                    payload = { distance: parseFloat(text) || null };
-                }
-            }
+    if (error) {
+      console.error('SUPABASE INSERT ERROR:', error.message);
+    } else {
+      console.log('DATA SAVED:', data);
+    }
+  } catch (err) {
+    console.error('MQTT PARSE ERROR');
+  }
+});
 
-            const distance = parseFloat(payload.distance ?? payload.msg ?? payload.value ?? null);
-            const status = computeStatus(distance);
+// health check
+app.get('/', (req, res) => {
+  res.send('Backend MQTT + Supabase running');
+});
 
-            await db.query('INSERT INTO logs(distance, status) VALUES (?, ?)', [distance || 0, status]);
-
-            await db.query('UPDATE latest_value SET distance = ?, status = ?, updated_at = NOW() WHERE id = 1',
-                [distance || 0, status]
-            );
-
-            if (status === 'warning' || status === 'danger') {
-                const msg = status === 'danger'
-                    ? `Jarak tangan terdeteksi ${distance} cm - BAHAYA!`
-                    : `Jarak tangan terdeteksi ${distance} cm - Waspada`;
-                await db.query('INSERT INTO alerts(message, level) VALUES (?, ?)', [msg, status]);
-            }
-
-            io.emit('distance_update', { distance, status, ts: new Date().toISOString() });
-
-            console.log('Saved distance:', distance, 'status:', status);
-        } catch (err) {
-            console.error('On message error:', err);
-        }
-    });
-}
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
