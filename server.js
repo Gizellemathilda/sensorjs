@@ -8,16 +8,15 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(cors());
-app.use(express.json());
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
-const calculateStatus = (distanceCm) => {
-  if (distanceCm < 5) return 'danger';
-  if (distanceCm < 15) return 'warning';
+const calculateStatus = (distance) => {
+  if (distance < 5) return 'danger';
+  if (distance < 15) return 'warning';
   return 'safe';
 };
 
@@ -34,36 +33,30 @@ mqttClient.on('connect', () => {
 mqttClient.on('message', async (topic, message) => {
   try {
     const payload = JSON.parse(message.toString());
+    const distance = Number(payload.distance);
 
-    const rawDistanceMm = Number(payload.distance);
-
-    if (Number.isNaN(rawDistanceMm)) {
-      throw new Error('Invalid distance value from sensor');
+    if (Number.isNaN(distance)) {
+      throw new Error('Invalid distance value');
     }
 
-    const distanceCm = Number((rawDistanceMm / 10).toFixed(2));
-
-    const status = calculateStatus(distanceCm);
+    // 🔥 HITUNG STATUS DI BACKEND
+    const status = calculateStatus(distance);
 
     const { error } = await supabase
       .from('sensor_data')
       .insert({
         profiles_id: process.env.PROFILES_ID,
-        distance: distanceCm, // ✅ SIMPAN CM
+        distance,
         status
       });
 
     if (error) {
-      console.error('❌ SUPABASE INSERT ERROR:', error.message);
+      console.error('SUPABASE INSERT ERROR:', error.message);
     } else {
-      console.log('✅ DATA SAVED:', {
-        raw_mm: rawDistanceMm,
-        cm: distanceCm,
-        status
-      });
+      console.log('DATA SAVED:', { distance, status });
     }
   } catch (err) {
-    console.error('❌ MQTT MESSAGE ERROR:', err.message);
+    console.error('MQTT MESSAGE ERROR:', err.message);
   }
 });
 
@@ -84,11 +77,11 @@ app.get('/api/sensor', async (req, res) => {
 
     res.json(data || []);
   } catch (err) {
-    console.error('❌ GET SENSOR ERROR:', err.message);
+    console.error(' GET SENSOR ERROR:', err.message);
     res.status(500).json({ error: 'Failed to fetch sensor data' });
   }
 });
 
 app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
+  console.log(`Server running on port ${PORT}`);
 });
